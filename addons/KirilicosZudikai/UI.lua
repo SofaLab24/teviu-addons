@@ -161,6 +161,7 @@ function KZ.ApplyHUD()
         hud:Hide()
     end
 end
+KZ.optionChanged.hud = KZ.ApplyHUD
 
 function KZ.Flash()
     if hud and hud:IsShown() then
@@ -173,13 +174,41 @@ end
 -- Kill list window
 ---------------------------------------------------------------------------
 
+-- "just now", "12 min ago", "3 h ago", "2 days ago"
+local function Ago(t)
+    local seconds = time() - (t or time())
+    if seconds < 120 then
+        return "just now"
+    elseif seconds < 3600 then
+        return math.floor(seconds / 60) .. " min ago"
+    elseif seconds < 86400 then
+        return math.floor(seconds / 3600) .. " h ago"
+    end
+    return KZ.Plural(math.floor(seconds / 86400), "day") .. " ago"
+end
+
+local function GuildTooltip(row)
+    GameTooltip:AddLine(row.name .. (row.me and " (you)" or ""), 1, 1, 1)
+    GameTooltip:AddDoubleLine("Kills", row.total, 0.8, 0.8, 0.8, 1, 1, 1)
+    GameTooltip:AddDoubleLine("Killing blows", row.kb, 0.8, 0.8, 0.8, 1, 1, 1)
+    GameTooltip:AddDoubleLine("Assists", row.total - row.kb, 0.8, 0.8, 0.8, 1, 1, 1)
+    GameTooltip:AddDoubleLine("This week", row.week, 0.8, 0.8, 0.8, 1, 1, 1)
+    GameTooltip:AddDoubleLine("Different players", row.victims, 0.8, 0.8, 0.8, 1, 1, 1)
+    GameTooltip:AddDoubleLine("Addon version", row.version or "?", 0.8, 0.8, 0.8, 1, 1, 1)
+    if not row.me then
+        GameTooltip:AddDoubleLine("Last update", Ago(row.seen), 0.8, 0.8, 0.8, 1, 1, 1)
+    end
+end
+
 local function RowTooltip(self)
     local item = self.item
     if not item then
         return
     end
     GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-    if item.victim then
+    if item.guild then
+        GuildTooltip(item.guild)
+    elseif item.victim then
         local v = item.victim
         GameTooltip:AddLine(item.name, KZ.ClassColor(v.class))
         local who = Describe(v.level, v.race, v.class)
@@ -243,10 +272,18 @@ local function CreateRow(index)
     return row
 end
 
+-- Fills `list` for the current tab. For the Guild tab, returns the guild's name
+-- (nil when you are not in a guild).
 local function BuildList()
     wipe(list)
     local db = KZ.char
-    if view == "victims" then
+    if view == "guild" then
+        local board, guild = KZ.GuildBoard()
+        for _, row in ipairs(board or {}) do
+            list[#list + 1] = { guild = row }
+        end
+        return guild
+    elseif view == "victims" then
         for name, victim in pairs(db.victims) do
             list[#list + 1] = { name = name, victim = victim }
         end
@@ -271,21 +308,19 @@ local function Render()
     window.summary:SetText(("Kills: |cffffffff%d|r   (killing blows %d, assists %d)\nToday: %d    This week: %d    Different players: %d"):format(
         db.total, db.killingBlows, db.total - db.killingBlows, db.day, db.week, KZ.CountVictims()))
 
-    if view == "victims" then
-        window.victimsTab:LockHighlight()
-        window.recentTab:UnlockHighlight()
-        window.head1:SetText("Player")
-        window.head2:SetText("Kills")
-        window.head3:SetText("Last kill")
-    else
-        window.recentTab:LockHighlight()
-        window.victimsTab:UnlockHighlight()
-        window.head1:SetText("Player")
-        window.head2:SetText("How")
-        window.head3:SetText("When and where")
+    for name, tab in pairs(window.tabs) do
+        if name == view then
+            tab:LockHighlight()
+        else
+            tab:UnlockHighlight()
+        end
     end
+    window.head1:SetText(view == "guild" and "Guildmate" or "Player")
+    window.head2:SetText(view == "recent" and "How" or "Kills")
+    window.head3:SetText((view == "victims" and "Last kill") or (view == "recent" and "When and where")
+        or "This week, last update")
 
-    BuildList()
+    local guild = BuildList()
     local maxOffset = math.max(0, #list - ROWS)
     if offset > maxOffset then
         offset = maxOffset
@@ -294,7 +329,17 @@ local function Render()
         local row, item = rows[i], list[offset + i]
         row.item = item
         if item then
-            if item.victim then
+            if item.guild then
+                local g = item.guild
+                row.name:SetText(g.rank .. ". " .. g.name .. (g.me and " (you)" or ""))
+                if g.me then
+                    row.name:SetTextColor(0.4, 1, 0.4)
+                else
+                    row.name:SetTextColor(1, 1, 1)
+                end
+                row.count:SetText(g.total)
+                row.info:SetText(("week %d, %s"):format(g.week, g.me and "now" or Ago(g.seen)))
+            elseif item.victim then
                 local v = item.victim
                 row.name:SetText(item.name)
                 row.name:SetTextColor(KZ.ClassColor(v.class))
@@ -313,7 +358,11 @@ local function Render()
         end
     end
 
-    if #list == 0 then
+    if view == "guild" and not guild then
+        window.footer:SetText("You are not in a guild.")
+    elseif view == "guild" and #list <= 1 then
+        window.footer:SetText("No guildmates with Kirilicos Žudikai 1.2+ heard from yet.")
+    elseif #list == 0 then
         window.footer:SetText("No kills yet.")
     else
         window.footer:SetText(("%d-%d of %d   (scroll with the mouse wheel)"):format(
@@ -321,16 +370,24 @@ local function Render()
     end
 end
 
+local function ShowView(name)
+    view = name
+    offset = 0
+    if name == "guild" then
+        KZ.RequestGuildStats()
+    end
+    Render()
+end
+
 local function CreateTab(label, x, name)
     local tab = CreateFrame("Button", nil, window, "UIPanelButtonTemplate")
-    tab:SetSize(120, 22)
+    tab:SetSize(112, 22)
     tab:SetPoint("TOPLEFT", x, -94)
     tab:SetText(label)
     tab:SetScript("OnClick", function()
-        view = name
-        offset = 0
-        Render()
+        ShowView(name)
     end)
+    window.tabs[name] = tab
     return tab
 end
 
@@ -365,6 +422,16 @@ local function CreateWindow()
     local close = CreateFrame("Button", nil, window, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", -5, -5)
 
+    local settings = CreateFrame("Button", nil, window, "UIPanelButtonTemplate")
+    settings:SetSize(76, 20)
+    settings:SetPoint("TOPLEFT", 16, -16)
+    settings:SetText("Settings")
+    settings:SetScript("OnClick", function()
+        window:Hide()
+        KZ.OpenSettings()
+    end)
+    window.settingsButton = settings
+
     local title = window:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     title:SetPoint("TOP", 0, -18)
     title:SetText(KZ.title)
@@ -375,8 +442,10 @@ local function CreateWindow()
     window.summary:SetJustifyH("LEFT")
     window.summary:SetSpacing(4)
 
+    window.tabs = {}
     window.victimsTab = CreateTab("Players", 22, "victims")
-    window.recentTab = CreateTab("Recent kills", 146, "recent")
+    window.recentTab = CreateTab("Recent kills", 140, "recent")
+    window.guildTab = CreateTab("Guild", 258, "guild")
 
     window.head1 = CreateHeader(0)
     window.head2 = CreateHeader(158)
@@ -411,6 +480,19 @@ function KZ.ToggleWindow()
         Render()
         window:Show()
     end
+end
+
+-- Opens the kill list on the Guild tab (/kz guild).
+function KZ.ShowGuildTab()
+    if not KZ.char then
+        return
+    end
+    if not window then
+        CreateWindow()
+    end
+    KZ.RollPeriods()
+    ShowView("guild")
+    window:Show()
 end
 
 ---------------------------------------------------------------------------

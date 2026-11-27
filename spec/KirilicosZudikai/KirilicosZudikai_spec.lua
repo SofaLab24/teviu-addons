@@ -1,41 +1,15 @@
 -- Kirilicos Žudikai, driven through the fake WoW client (spec/helpers/wow_mock.lua).
 -- Run from the repo root: busted spec/KirilicosZudikai
 
-local M = require("wow_mock")
-
-local DIR, ADDON = "addons/KirilicosZudikai", "KirilicosZudikai"
-local ME = "Player-1-0000000A"
-local V1 = "Player-2-00000001"
-local V2 = "Player-3-00000002"
-local MATE = "Player-1-0000000B"
+local S = dofile("spec/KirilicosZudikai/support.lua")
+local M, ME, V1, V2, MATE = S.M, S.ME, S.V1, S.V2, S.MATE
+local addPlayer, killingBlow, honorLine, assertContains = S.addPlayer, S.killingBlow, S.honorLine, S.contains
 
 local KZ
 
 local function session(keepSaved, extra)
-    KZ = M.NewSession(DIR, ADDON, keepSaved, function()
-        M.units.player = ME
-        M.players[ME] = { name = "Test Paladin", class = "PALADIN", race = "Undead", level = 45 }
-        if extra then
-            extra()
-        end
-    end)
+    KZ = S.session(keepSaved, extra)
     return KZ
-end
-
-local function addPlayer(guid, name, class, level)
-    M.players[guid] = { name = name, class = class or "WARRIOR", race = "Human", level = level or 40 }
-end
-
-local function killingBlow(victim, attacker)
-    M.Fire("PARTY_KILL", attacker or ME, victim)
-end
-
-local function honorLine(name, template)
-    M.Fire("CHAT_MSG_COMBAT_HONOR_GAIN", (template or COMBATLOG_HONORGAIN):format(name, "Private", 12))
-end
-
-local function assertContains(text, piece)
-    assert(tostring(text):find(piece, 1, true), ("%q not found in:\n%s"):format(piece, tostring(text)))
 end
 
 describe("Kirilicos Žudikai", function()
@@ -335,7 +309,8 @@ describe("Kirilicos Žudikai", function()
             session()
             honorLine("Борис Бородач")
             M.Advance(1)
-            for _, cmd in ipairs({ "", "", "hud", "hud", "sound", "sound", "chat", "chat", "status", "help", "reset" }) do
+            for _, cmd in ipairs({ "", "", "hud", "hud", "sound", "sound", "chat", "chat", "alert", "alert",
+                "skull", "skull", "settings", "guild", "status", "help", "reset" }) do
                 SlashCmdList.KIRILICOSZUDIKAI(cmd)
             end
             assert.are.equal(1, KZ.char.total) -- plain "reset" does not delete

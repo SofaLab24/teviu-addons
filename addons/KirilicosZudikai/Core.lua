@@ -19,6 +19,14 @@ KZ.version = (GetMeta and GetMeta(ADDON_NAME, "Version")) or "?"
 -- UI.lua replaces these. They exist here so the core never calls a missing function.
 KZ.Refresh = function() end
 KZ.Flash = function() end
+-- Guild.lua replaces this: runs after a kill is counted, upgraded or reset.
+KZ.OnStatsChanged = function() end
+-- Functions the other files add; each runs once at PLAYER_LOGIN, after the saved data loaded.
+KZ.loginHooks = {}
+-- key -> function(newValue), run whenever that setting changes (slash command or Options page).
+KZ.optionChanged = {}
+-- key -> the Options page's setting object, once Settings.lua registered it.
+KZ.settingObjects = {}
 
 local MERGE_WINDOW = 10            -- seconds: both signals for one death arrive within this
 local LOG_LIMIT = 500              -- newest kills kept in the saved log
@@ -89,6 +97,9 @@ local function Call(fn, ...)
     end
     return pass(pcall(fn, ...))
 end
+
+-- Shared with the other files of the addon.
+KZ.Plain, KZ.PlainString, KZ.PlainNumber, KZ.Call = Plain, PlainString, PlainNumber, Call
 
 ---------------------------------------------------------------------------
 -- Names
@@ -202,6 +213,8 @@ local function RememberUnit(unit)
     row.race = PlainString(Call(UnitRace, unit)) or row.race
 end
 
+KZ.RememberUnit = RememberUnit
+
 local function GuidForName(name)
     local best, bestTime
     for guid, row in pairs(seen) do
@@ -238,7 +251,34 @@ end
 -- Saved data
 ---------------------------------------------------------------------------
 
-local ACCOUNT_DEFAULTS = { announce = true, sound = true, hud = true }
+-- Account-wide settings and their defaults. Settings.lua shows each one on the Options page.
+local ACCOUNT_DEFAULTS = {
+    announce = true,              -- chat line on each kill
+    sound = true,                 -- kill sound
+    hud = true,                   -- on-screen counter
+    alert = true,                 -- alert when a Cyrillic enemy's nameplate appears
+    alertSound = true,
+    alertInBattlegrounds = false, -- nearly every enemy there would trigger one
+    alertCooldown = 5,            -- minutes before the same player alerts again
+    skull = true,                 -- skull above their nameplate
+    guildShare = true,            -- send my totals to the guild leaderboard
+}
+KZ.ACCOUNT_DEFAULTS = ACCOUNT_DEFAULTS
+
+-- Changes a setting and runs what depends on it. When the Options page exists, the
+-- change goes through it, so the page and the slash commands always agree.
+function KZ.SetOption(key, value)
+    local setting = KZ.settingObjects[key]
+    if setting then
+        setting:SetValue(value) -- the page's callback runs KZ.optionChanged[key]
+        return
+    end
+    KZ.settings[key] = value
+    local onChange = KZ.optionChanged[key]
+    if onChange then
+        onChange(value)
+    end
+end
 local CHAR_COUNTERS = { "total", "killingBlows", "day", "week" }
 
 local function InitData()
@@ -374,6 +414,7 @@ function KZ.ResetCharacter()
     KirilicosZudikaiCharDB = {}
     InitData()
     KZ.Refresh()
+    KZ.OnStatsChanged()
 end
 
 ---------------------------------------------------------------------------
@@ -432,6 +473,11 @@ function KZ.ColorName(name, class)
     return ("|cff%02x%02x%02x%s|r"):format(math.floor(r * 255), math.floor(g * 255), math.floor(b * 255), name)
 end
 
+-- "Warrior" for "WARRIOR" (the game's localized name when it has one).
+function KZ.ClassName(class)
+    return (class and LOCALIZED_CLASS_NAMES_MALE and LOCALIZED_CLASS_NAMES_MALE[class]) or class
+end
+
 function KZ.Print(message)
     local chat = DEFAULT_CHAT_FRAME
     if chat then
@@ -439,9 +485,16 @@ function KZ.Print(message)
     end
 end
 
+-- Plays a game sound by its SOUNDKIT name, or the fallback name if this client lacks it.
+function KZ.PlaySoundKit(name, fallback)
+    local kit = SOUNDKIT and (SOUNDKIT[name] or (fallback and SOUNDKIT[fallback]))
+    if kit then
+        pcall(PlaySound, kit, "Master")
+    end
+end
+
 function KZ.PlayKillSound()
-    local kit = (SOUNDKIT and SOUNDKIT.RAID_WARNING) or 8959
-    pcall(PlaySound, kit, "Master")
+    KZ.PlaySoundKit("RAID_WARNING")
 end
 
 function KZ.Announce(entry, victim, isTest)
@@ -467,6 +520,7 @@ local function CountIfCyrillic(e, info)
     local entry, victim = Record(e.name, e.kb, info or {})
     e.entry = entry
     KZ.Refresh()
+    KZ.OnStatsChanged()
     if C_Timer and C_Timer.After then
         C_Timer.After(ANNOUNCE_DELAY, function()
             KZ.Announce(entry, victim)
@@ -490,6 +544,7 @@ function KZ.Credit(killingBlow, guid, name, info)
             if e.entry then
                 UpgradeToKillingBlow(e.entry)
                 KZ.Refresh()
+                KZ.OnStatsChanged()
             end
         end
         CountIfCyrillic(e, info)
@@ -707,6 +762,9 @@ frame:SetScript("OnEvent", function(_, event, ...)
         if KZ.InitUI then
             KZ.InitUI()
         end
+        for _, hook in ipairs(KZ.loginHooks) do
+            hook()
+        end
         if C_Timer and C_Timer.NewTicker then
             -- Keeps "today" and "this week" right across midnight.
             C_Timer.NewTicker(60, function()
@@ -759,6 +817,11 @@ function KZ.PrintStatus()
     if s.lastUnreadLine then
         KZ.Print("Last honor line not understood: " .. s.lastUnreadLine)
     end
+    for _, statusLines in ipairs({ KZ.NameplateStatusLines, KZ.GuildStatusLines }) do
+        for _, line in ipairs(statusLines and statusLines() or {}) do
+            KZ.Print(line)
+        end
+    end
 end
 
 -- Fills a format string with sample values, the name as argument 1.
@@ -802,8 +865,11 @@ function KZ.RunTest()
         end
     end
     check("linked name", KZ.ParseHonor("|Hplayer:Борис Бородач|h[Борис Бородач]|h dies, honorable kill Rank: Private (Estimated Honor Points: 12)"), "Борис Бородач")
-    KZ.Print(("Self-test: %d passed, %d failed. A sample kill follows:"):format(passed, failed))
+    KZ.Print(("Self-test: %d passed, %d failed. A sample kill and a sample alert follow:"):format(passed, failed))
     KZ.Announce({ name = sample, kb = true, class = "WARRIOR", level = 42 }, { n = 1 }, true)
+    if KZ.PreviewAlert then
+        KZ.PreviewAlert(sample, { class = "WARRIOR", level = 42 })
+    end
 end
 
 ---------------------------------------------------------------------------
@@ -813,12 +879,21 @@ end
 local function Help()
     KZ.Print("commands:")
     KZ.Print("  /kz - open or close the kill list")
+    KZ.Print("  /kz guild - the guild leaderboard")
+    KZ.Print("  /kz settings - the Options page (Esc > Options > AddOns)")
     KZ.Print("  /kz hud - show or hide the on-screen counter")
     KZ.Print("  /kz sound - turn the kill sound on or off")
-    KZ.Print("  /kz chat - turn the chat line on or off")
+    KZ.Print("  /kz chat - turn the kill chat line on or off")
+    KZ.Print("  /kz alert - turn alerts for nearby Cyrillic enemies on or off")
+    KZ.Print("  /kz skull - turn the skull above their nameplates on or off")
     KZ.Print("  /kz status - counts and what the game reported this session")
-    KZ.Print("  /kz test - self-check and a sample kill (nothing is saved)")
+    KZ.Print("  /kz test - self-check, a sample kill and a sample alert (nothing is saved)")
     KZ.Print("  /kz reset confirm - delete this character's kills")
+end
+
+local function Toggle(key, label)
+    KZ.SetOption(key, not KZ.settings[key])
+    KZ.Print(label .. " " .. OnOff(KZ.settings[key]))
 end
 
 SLASH_KIRILICOSZUDIKAI1 = "/kz"
@@ -834,17 +909,23 @@ SlashCmdList.KIRILICOSZUDIKAI = function(input)
             KZ.ToggleWindow()
         end
     elseif cmd == "hud" then
-        KZ.settings.hud = not KZ.settings.hud
-        if KZ.ApplyHUD then
-            KZ.ApplyHUD()
-        end
-        KZ.Print("on-screen counter " .. OnOff(KZ.settings.hud))
+        Toggle("hud", "on-screen counter")
     elseif cmd == "sound" then
-        KZ.settings.sound = not KZ.settings.sound
-        KZ.Print("kill sound " .. OnOff(KZ.settings.sound))
+        Toggle("sound", "kill sound")
     elseif cmd == "chat" then
-        KZ.settings.announce = not KZ.settings.announce
-        KZ.Print("chat line " .. OnOff(KZ.settings.announce))
+        Toggle("announce", "chat line")
+    elseif cmd == "alert" or cmd == "alerts" then
+        Toggle("alert", "alerts for nearby Cyrillic enemies")
+    elseif cmd == "skull" or cmd == "skulls" then
+        Toggle("skull", "skulls above their nameplates")
+    elseif cmd == "settings" or cmd == "options" or cmd == "config" then
+        if KZ.OpenSettings then
+            KZ.OpenSettings()
+        end
+    elseif cmd == "guild" then
+        if KZ.ShowGuildTab then
+            KZ.ShowGuildTab()
+        end
     elseif cmd == "status" then
         KZ.PrintStatus()
     elseif cmd == "test" then

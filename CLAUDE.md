@@ -5,6 +5,7 @@ README.md covers the layout, setup, releasing and how to add an addon. Keep it u
 
 ## Workflow
 
+- **Branches:** every change goes on its own branch (`feature/<topic>` or `fix/<topic>`). Push the branch and offer a pull request. Never commit to `main`; the user merges.
 - **Layout:** `addons/<Addon>/` holds only the files that ship. Tests live in `spec/<Addon>/`, and the fake client is `spec/helpers/wow_mock.lua`.
 - **After every change,** run both from the repo root, on this Windows machine through WSL:
   - `wsl luacheck .`, which must report 0 warnings
@@ -32,6 +33,9 @@ Look up how other WoW addon projects solve it before choosing an approach: other
 ## Code and repo conventions
 
 - **Lua 5.1 in `addons/`:** no `goto`, `//`, bit operators or integer division. Specs and the mock may use anything that runs on Lua 5.1 to 5.4.
+- **Settings:** a new user setting gets a default in the addon's defaults table and a row on its Options page (Blizzard's Settings API, as in `addons/KirilicosZudikai/Settings.lua`). Change it with the addon's `SetOption`, so the page and the slash commands stay in step.
+- **Guild messages:** one short message per update, with an addon-specific prefix (16 characters at most). Pace them well under the game's limit (10 at once, then 1 a second). Each player sends only their own data, never relays others', and every incoming field is validated.
+- **Raid markers:** `SetRaidTarget` is protected (since 12.0). Draw your own icon instead.
 - **luacheck:** every addon gets its own `files["addons/<Addon>/**/*.lua"]` block in `.luacheckrc` listing its globals. New WoW API goes in `read_globals`.
 - **Tests:** add a spec for every behaviour change. Extend `spec/helpers/wow_mock.lua` when an addon needs more of the API.
 - **The repo is public.** No real player names, character names, local paths or other personal data in code, tests or docs; use invented names.
