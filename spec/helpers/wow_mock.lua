@@ -35,7 +35,7 @@ for name in ([[
     RegisterForClicks StartMoving StopMovingOrSizing SetBackdrop SetBackdropColor
     SetBackdropBorderColor SetColorTexture SetTexture SetAlpha SetFromAlpha SetToAlpha
     SetDuration Play Stop SetJustifyH SetWordWrap SetSpacing LockHighlight UnlockHighlight
-    SetOwner AddLine AddDoubleLine AddMessage
+    SetOwner AddLine AddDoubleLine AddMessage SetParent GetParent SetFrameLevel IsForbidden
 ]]):gmatch("%S+") do
     KNOWN_METHODS[name] = true
 end
@@ -77,6 +77,9 @@ function Widget:GetPoint()
     end
     return p[1], nil, p[1], p[2] or 0, p[3] or 0
 end
+function Widget:SetParent(parent) self.parent = parent end
+function Widget:GetParent() return self.parent end
+function Widget:IsForbidden() return self.forbidden == true end
 function Widget:CreateTexture() return M.NewWidget("Texture") end
 function Widget:CreateFontString() return M.NewWidget("FontString") end
 function Widget:CreateAnimationGroup() return M.NewWidget("AnimationGroup") end
@@ -120,6 +123,20 @@ function M.Reset()
     M.zone = "Badlands"
     M.instanceType = "none"
     M.unknownEvents = {}
+    M.soundKits = {}     -- every kit passed to PlaySound
+    M.raidWarnings = {}  -- texts shown with RaidNotice_AddMessage
+    M.inCombat = false
+    -- guild and addon messages
+    M.guildName = "Test Guild" -- nil: not in a guild
+    M.sent = {}          -- addon messages sent: { prefix, text, chatType, at }
+    M.prefixes = {}      -- registered prefixes
+    M.sendResults = {}   -- results SendAddonMessage returns next (default 0 = Success)
+    M.lockdown = false   -- C_ChatInfo.InChatMessagingLockdown()
+    -- nameplates
+    M.plates = {}        -- unit token -> nameplate widget
+    -- Settings API
+    M.settingsCategories = {}
+    M.openedCategory = nil
     M.now = 1000                                                        -- GetTime()
     M.clock = os.time({ year = 2026, month = 11, day = 27, hour = 20 }) -- time()
 end
@@ -173,6 +190,35 @@ end
 
 function M.ChatText()
     return table.concat(M.chat, "\n")
+end
+
+-- A nameplate appears for unit (e.g. "nameplate1") showing the player guid.
+-- opts.forbidden makes it a nameplate addons may not touch.
+function M.AddPlate(unit, guid, opts)
+    local plate = M.NewWidget("NamePlate")
+    plate.namePlateUnitToken = unit
+    plate.forbidden = opts and opts.forbidden or nil
+    M.units[unit] = guid
+    M.plates[unit] = plate
+    M.Fire("NAME_PLATE_UNIT_ADDED", unit)
+    return plate
+end
+
+function M.RemovePlate(unit)
+    M.Fire("NAME_PLATE_UNIT_REMOVED", unit)
+    M.plates[unit] = nil
+    M.units[unit] = nil
+end
+
+-- The addon messages sent so far with this prefix, as a list of texts.
+function M.SentTexts(prefix)
+    local texts = {}
+    for _, m in ipairs(M.sent) do
+        if m.prefix == prefix then
+            texts[#texts + 1] = m.text
+        end
+    end
+    return texts
 end
 
 ---------------------------------------------------------------------------
@@ -236,11 +282,110 @@ end
 api.UnitLevel = function(unit) local p = unitPlayer(unit) return p and p.level end
 api.UnitClass = function(unit) local p = unitPlayer(unit) if p then return p.class, p.class end end
 api.UnitRace = function(unit) local p = unitPlayer(unit) if p then return p.race, p.race end end
+api.UnitIsPlayer = function(unit) local p = unitPlayer(unit) return p ~= nil and not p.npc end
+api.UnitIsEnemy = function(_, unit) local p = unitPlayer(unit) return p ~= nil and p.enemy == true end
+api.UnitFactionGroup = function(unit) local p = unitPlayer(unit) if p and p.faction then return p.faction, p.faction end end
 api.IsInInstance = function() return M.instanceType ~= "none", M.instanceType end
+api.InCombatLockdown = function() return M.inCombat end
 api.GetRealZoneText = function() return M.zone end
 api.GetZoneText = function() return M.zone end
-api.PlaySound = function() M.sounds = M.sounds + 1 end
-api.SOUNDKIT = { RAID_WARNING = 8959 }
+api.PlaySound = function(kit)
+    M.sounds = M.sounds + 1
+    table.insert(M.soundKits, kit)
+end
+api.SOUNDKIT = { RAID_WARNING = 8959, RAID_BOSS_EMOTE_WARNING = 12197 }
+api.RaidWarningFrame = M.NewWidget("Frame")
+api.RaidNotice_AddMessage = function(_, text) table.insert(M.raidWarnings, text) end
+
+-- Guild and addon messages
+api.Enum = {
+    SendAddonMessageResult = {
+        Success = 0, InvalidPrefix = 1, InvalidMessage = 2, AddonMessageThrottle = 3,
+        InvalidChatType = 4, NotInGroup = 5, TargetRequired = 6, InvalidChannel = 7,
+        ChannelThrottle = 8, GeneralError = 9, NotInGuild = 10, AddOnMessageLockdown = 11,
+        TargetOffline = 12,
+    },
+}
+api.C_ChatInfo = {
+    RegisterAddonMessagePrefix = function(prefix)
+        M.prefixes[prefix] = true
+        return true
+    end,
+    SendAddonMessage = function(prefix, text, chatType)
+        local result = table.remove(M.sendResults, 1) or 0
+        if result == 0 then
+            table.insert(M.sent, { prefix = prefix, text = text, chatType = chatType, at = M.now })
+        end
+        return result
+    end,
+    InChatMessagingLockdown = function() return M.lockdown end,
+}
+api.IsInGuild = function() return M.guildName ~= nil end
+api.GetGuildInfo = function(unit)
+    if unit == "player" and M.guildName then
+        return M.guildName, "Member", 5
+    end
+end
+
+-- Nameplates
+api.C_NamePlate = {
+    GetNamePlateForUnit = function(unit) return M.plates[unit] end,
+    GetNamePlates = function()
+        local list = {}
+        for _, plate in pairs(M.plates) do
+            list[#list + 1] = plate
+        end
+        return list
+    end,
+}
+
+-- Blizzard's Settings API (the Options window), as far as addons use it.
+local Setting = {}
+Setting.__index = Setting
+function Setting:GetValue() return self.tbl[self.key] end
+function Setting:SetValue(value)
+    self.tbl[self.key] = value
+    if self.callback then self.callback(self, value) end
+end
+function Setting:SetValueChangedCallback(fn) self.callback = fn end
+
+local nextCategoryID = 0
+api.Settings = {
+    RegisterVerticalLayoutCategory = function(name)
+        nextCategoryID = nextCategoryID + 1
+        local id = nextCategoryID
+        local category = { name = name, controls = {}, GetID = function() return id end }
+        local layout = { initializers = {} }
+        function layout:AddInitializer(initializer) table.insert(self.initializers, initializer) end
+        category.layout = layout
+        return category, layout
+    end,
+    RegisterAddOnSetting = function(category, variable, key, tbl, varType, name, default)
+        assert(type(tbl) == "table", "RegisterAddOnSetting needs the saved-variables table")
+        assert(varType == type(default), "the variable type must match the default")
+        if tbl[key] == nil then tbl[key] = default end
+        return setmetatable({ category = category, variable = variable, key = key, tbl = tbl,
+            name = name, default = default }, Setting)
+    end,
+    CreateCheckbox = function(category, setting, tooltip)
+        table.insert(category.controls, { kind = "checkbox", setting = setting, tooltip = tooltip })
+    end,
+    CreateSliderOptions = function(minValue, maxValue, step)
+        local options = { min = minValue, max = maxValue, step = step }
+        function options:SetLabelFormatter(formatter) self.formatter = formatter end
+        return options
+    end,
+    CreateSlider = function(category, setting, options, tooltip)
+        table.insert(category.controls, { kind = "slider", setting = setting, options = options, tooltip = tooltip })
+    end,
+    RegisterAddOnCategory = function(category) table.insert(M.settingsCategories, category) end,
+    OpenToCategory = function(id) M.openedCategory = id end,
+}
+api.CreateSettingsListSectionHeaderInitializer = function(text) return { header = text } end
+api.CreateSettingsButtonInitializer = function(name, buttonText, onClick, tooltip, addSearchTags)
+    return { button = name, buttonText = buttonText, onClick = onClick, tooltip = tooltip, searchTags = addSearchTags }
+end
+api.MinimalSliderWithSteppersMixin = { Label = { Right = 1 } }
 api.RAID_CLASS_COLORS = {
     WARRIOR = { r = 0.78, g = 0.61, b = 0.43 }, PALADIN = { r = 0.96, g = 0.55, b = 0.73 },
     MAGE = { r = 0.25, g = 0.78, b = 0.92 }, ROGUE = { r = 1, g = 0.96, b = 0.41 },

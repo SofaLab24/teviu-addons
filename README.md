@@ -4,7 +4,7 @@ World of Warcraft addons for **WoW Forever** (client 1.60, `## Interface: 16001`
 
 | Addon | What it does |
 |---|---|
-| [Kirilicos Žudikai](addons/KirilicosZudikai/) | Counts your kills (killing blows and assists) of players whose names contain Cyrillic letters. |
+| [Kirilicos Žudikai](addons/KirilicosZudikai/) | Counts your kills (killing blows and assists) of players whose names contain Cyrillic letters, marks them on their nameplates, and keeps a guild leaderboard. |
 
 ## Install (players)
 
