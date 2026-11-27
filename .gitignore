@@ -1,0 +1,14 @@
+# Build output (CI builds zips in dist/; a local BigWigs packager run uses .release/)
+dist/
+.release/
+
+# Local Lua tooling
+.luarocks/
+luacov.*.out
+
+# Editor and OS clutter (.vscode/extensions.json is shared on purpose)
+.vscode/*
+!.vscode/extensions.json
+*.bak
+Thumbs.db
+.DS_Store

@@ -1,0 +1,52 @@
+name: CI
+
+# Lint and test on every push to main and every pull request, then build a zip of
+# each addon. The zips are kept as the run's artifacts (Actions tab, signed in).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lint and test on Lua 5.1
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Lua 5.1, busted and luacheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.1 lua-busted lua-check
+
+      - name: Lint
+        run: luacheck .
+
+      - name: Test
+        run: busted --lua=lua5.1
+
+  build:
+    name: Build addon zips
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Zip each addon
+        run: |
+          mkdir -p dist
+          cd addons
+          for dir in */; do
+            addon="${dir%/}"
+            zip -r -X "../dist/${addon}-${GITHUB_SHA::7}.zip" "$addon" -x '*/.*'
+          done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: addons-${{ github.sha }}
+          path: dist/*.zip
+          retention-days: 30

@@ -1,0 +1,98 @@
+name: Release
+
+# Push a tag named <AddOn>-v<version>, for example KirilicosZudikai-v1.1.0.
+# The version must equal "## Version:" in addons/<AddOn>/<AddOn>.toc.
+# A version with a suffix (1.2.0-beta1, 1.2.0-rc1) is published as a pre-release.
+on:
+  push:
+    tags:
+      - "*-v*"
+
+permissions: {}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub release
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # tags and history, for this addon's release notes
+
+      - name: Check the tag against the addon
+        id: tag
+        run: |
+          tag="$GITHUB_REF_NAME"
+          addon="${tag%-v*}"
+          version="${tag##*-v}"
+          toc="addons/$addon/$addon.toc"
+          if [ ! -f "$toc" ]; then
+            echo "::error::Tag $tag names no addon: $toc does not exist."
+            exit 1
+          fi
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)[0-9.]*)?$'; then
+            echo "::error::Version '$version' should look like 1.2.3 or 1.2.3-beta1."
+            exit 1
+          fi
+          toc_version="$(sed -n 's/^## Version:[[:space:]]*//p' "$toc" | tr -d '\r' | head -n 1)"
+          if [ "$toc_version" != "$version" ]; then
+            echo "::error::$toc has '## Version: $toc_version' but the tag says $version. Fix the .toc, commit, and tag that commit."
+            exit 1
+          fi
+          prerelease=false
+          case "$version" in *-*) prerelease=true ;; esac
+          {
+            echo "addon=$addon"
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install Lua 5.1, busted and luacheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.1 lua-busted lua-check
+
+      - name: Lint and test
+        run: |
+          luacheck .
+          busted --lua=lua5.1
+
+      - name: Build the zip
+        env:
+          ADDON: ${{ steps.tag.outputs.addon }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          mkdir -p dist
+          cd addons
+          zip -r -X "../dist/${ADDON}-${VERSION}.zip" "$ADDON" -x '*/.*'
+
+      - name: Write release notes from this addon's commits
+        env:
+          ADDON: ${{ steps.tag.outputs.addon }}
+        run: |
+          previous="$(git describe --tags --abbrev=0 --match "${ADDON}-v*" "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+          range="${previous:+$previous..}$GITHUB_REF_NAME"
+          {
+            echo "## Changes"
+            git log --no-merges --pretty='- %s' "$range" -- "addons/$ADDON" "spec/$ADDON"
+            echo
+            echo "## Install"
+            echo "Unzip into \`World of Warcraft/_forever_/Interface/AddOns/\` so you get \`AddOns/$ADDON/$ADDON.toc\`, then restart WoW."
+          } > notes.md
+          cat notes.md
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ADDON: ${{ steps.tag.outputs.addon }}
+          VERSION: ${{ steps.tag.outputs.version }}
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
+        run: |
+          flags=()
+          if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" "dist/${ADDON}-${VERSION}.zip" \
+            --verify-tag \
+            --title "$ADDON $VERSION" \
+            --notes-file notes.md \
+            "${flags[@]}"

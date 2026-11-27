@@ -1,0 +1,8 @@
+-- busted settings: run `busted` from the repo root (or `busted spec/<AddOn>` for one addon).
+return {
+    default = {
+        ROOT = { "spec" },
+        pattern = "_spec",
+        lpath = "./spec/helpers/?.lua",
+    },
+}

@@ -1,0 +1,10 @@
+## Interface: 16001
+## Title: |cffcc3333Kirilicos|r Žudikai
+## Notes: Counts your kills (killing blows and assists) of players whose names contain Cyrillic letters.
+## Version: 1.1.0
+## IconTexture: Interface\Icons\INV_Misc_Bone_HumanSkull_01
+## SavedVariables: KirilicosZudikaiDB
+## SavedVariablesPerCharacter: KirilicosZudikaiCharDB
+
+Core.lua
+UI.lua
